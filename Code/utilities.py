@@ -97,8 +97,6 @@ def first_hit_mask(M, targets):
     return out
 
 
-import numpy as np
-
 
 def first_hit_indices(M, targets):
     """
