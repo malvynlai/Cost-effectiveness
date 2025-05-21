@@ -1,0 +1,321 @@
+import numpy as np
+import pandas as pd
+from numba import njit, prange
+from datetime import datetime
+import copy
+
+from scipy import stats
+import compressedInputsRead4 as readInputs
+import MCMC4 as MC
+import sys
+import time
+import Visualizations.vizFinal as viz
+import Visualizations.verFinal as viz2
+import utilities as utils
+
+np.random.seed(42)
+
+# Set display options for NumPy
+np.set_printoptions(threshold=np.inf, linewidth=np.inf)
+
+# Set display options for pandas
+pd.set_option('display.max_rows', None)
+pd.set_option('display.max_columns', None)
+pd.set_option('display.width', None)
+pd.set_option('display.max_colwidth', None)
+pd.set_option('display.float_format', '{:,.0f}'.format)
+
+
+# file = r"C:\Users\sovan\Box\Sovann Linden's Files\Cost-effectiveness\Inputs\Inputs_CEA_v4.xlsx"
+file = '/Users/malvynlai/Library/CloudStorage/Box-Box/Cost-effectiveness/Inputs/Inputs_CEA_v4_sensitivity.xlsx'
+file = '/Users/malvynlai/Desktop/Lab Projects/Cost Effectiveness/Inputs/Inputs_CEA_v4_changed HCC distributions_JLcopy_3.19.25_single input.xlsx'
+file = '/Users/sovann/Library/CloudStorage/Box-Box/Sovann Linden\'s Files/Cost-effectiveness//Inputs/Inputs_CEA_v50_5.15.25.xlsx'
+file = '/Users/sovann/Downloads/Inputs_CEA_v50_5.20.25_v2.xlsx'
+#file = r"C:\Users\joannekl\Box\Cost-effectiveness\Inputs\Inputs_CEA_v50_5.20.25.xlsx"
+# file = '/home/ec2-user/Cost-effectiveness/Inputs/Inputs_CEA_v4.xlsx'
+#file = '~/Desktop/Lab Projects/Cost Effectiveness/Inputs/Inputs_CEA_v4.xlsx'
+# file = r"C:\Users\joannekl\Box\Cost-effectiveness\Inputs\Inputs_CEA_v4_2.20.xlsx" 
+
+def fmt(x):
+    try:
+        xf = float(x)
+    except (ValueError, TypeError):
+        return x                # non‐numeric: leave as is
+    if xf < 100:
+        return f"{xf:.3f}"      # three decimals
+    else:
+        return f"{xf:.0f}"      # no decim
+
+def round_if_gt_100(x):
+    if isinstance(x, (int, float)) and x > 100:
+        return int(round(x))   # round, then cast to int
+    else:
+        return x
+
+def completeRunAge(sheets,intervention=False, random_numbers=None):
+    np.random.seed(42)
+    df = sheets['ReadingSheet']
+
+    if intervention == True:
+        df = sheets["ReadingSheetIntervention"]
+    discountRate = 0.03
+    num_steps = 100
+    num_chains = 10**6
+    random_numbers = np.random.rand(num_chains, num_steps - 1)
+ 
+    
+    posDeath = 5
+    ageRange = 83
+
+
+    df1 = sheets['ActuarialTables']  
+    probDeath = readInputs.generate_prob_death(df1)
+    df2 = sheets['AgeVector']
+    ageVector = readInputs.generate_age_vector(df2,num_chains)
+    
+    t = readInputs.generateCleanTransition(df).to_numpy()
+    df1 = sheets['ActuarialTables']  
+    probDeath = readInputs.generate_prob_death(df1)
+    df2 = sheets['AgeVector']
+    size = len(t)
+    t = MC.generate_transition_matrixAgeDistribution(t, size, probDeath, posDeath)
+    
+    if intervention:
+        costUtility = readInputs.generate_cost_utility_matrix_intervention(df)
+      
+    else: 
+        costUtility = readInputs.generate_cost_utility_matrix(df)
+
+    rewardVector = np.expand_dims(costUtility.iloc[:,0].to_numpy(), axis = 1)
+    utilityVector = np.expand_dims(costUtility.iloc[:,1].to_numpy(), axis = 1)
+
+    print("Start simulation")
+
+    states, discountMatrix= MC.simulationwithAge(
+        t, 
+        rewardVector, 
+        utilityVector, 
+        ageVector, 
+        random_numbers, 
+        discountRate, 
+        num_steps, 
+        num_chains
+    )
+
+    print("End simulation")
+    return states, discountMatrix, rewardVector, utilityVector
+
+def statesPostProcessing(s,discountMatrix, rewardVector, utilityVector, columns, index): 
+    print("Start post processing")
+    mask = ~np.all(np.isin(s, [0, 5,6]), axis=1)
+    
+    results_no_intervention = pd.DataFrame(np.nan,
+        index = index,
+        columns = columns
+    )
+
+    oldStates= copy.deepcopy(s)
+    oldStates2 = copy.deepcopy(oldStates)
+
+    # REWARDS
+    rewards = MC.populate_matrix_with_indices(rewardVector, s)
+    rewardsDiscount = rewards * discountMatrix
+
+    # UTILITIES
+    integerUtility = 100*utilityVector  #  as dtype of states is int64
+    utilities =  MC.populate_matrix_with_indices(integerUtility, oldStates)
+    utilitiesDiscount = utilities * discountMatrix
+    utilities = utilities/100 
+    utilitiesDiscount =  utilitiesDiscount/100
+
+    s = oldStates2
+
+    specialStates = [[0], [4], [7], [8], [9], [7,8,9], [11], [10], [13], [12], [15], [14]]
+    averages = []
+
+    for x in specialStates:
+        averages.append([utils.rewardsTotalAfter(x, s, rewards)])
+    for x in specialStates:
+        averages.append([utils.rewardsTotalAfter(x, s, rewardsDiscount)])
+
+    for x in specialStates:
+        averages.append([utils.rewardsTotalAfter(x, s, utilities)])
+
+    for x in specialStates:
+        averages.append([utils.rewardsTotalAfter(x, s, utilitiesDiscount)])
+
+    averages = [item for sublist in averages for item in sublist]
+
+    sheets = pd.read_excel(file, sheet_name=None)
+    df2 = sheets['AgeVector']
+    ageVector = readInputs.generate_age_vector(df2,len(s))
+
+    
+
+    for x in specialStates:
+        averages.append(utils.average_age_reaching_state_numba(x, ageVector, s))
+
+    for x in specialStates:
+        averages.append(utils.average_age_death_after_state_numba(x, ageVector, s))
+  
+    # STATES % TOTAL
+
+    print(utils.specificStateTotal(s, [5]))
+    a = utils.specificStateTotal(s, [10,11,12,13,14,15])
+    b = utils.specificStateTotal(s, [6])
+
+    # SURVIVAL HCC
+
+    survival =  utils.numba_mean_hcc_to_death(s) -1
+    results_no_intervention = [a] + [b]+ [survival] +  [utils.rewardsSum([0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15], s, rewardsDiscount)] + [utils.rewardsSum([0,1,2,3,4,5,6,7,8,9,10,11,12,13,15],s, utilitiesDiscount)]+ [x for x in averages] 
+    results_no_intervention = pd.DataFrame(results_no_intervention,index = index)
+    results_no_intervention= results_no_intervention.applymap(round_if_gt_100)
+
+    print(results_no_intervention)
+    return results_no_intervention
+
+def writeout(results_no_intervention, results_intervention):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    control_sheet = f'Control_{timestamp}'
+    intervention_sheet = f'Intervention_{timestamp}'
+
+    try:
+        with pd.ExcelWriter('verifications.xlsx', engine='openpyxl', mode='a', if_sheet_exists='replace') as writer:
+            results_no_intervention.to_excel(writer, sheet_name='Control', index=True)
+            results_intervention.to_excel(writer, sheet_name='Intervention', index=True)
+    except FileNotFoundError:
+        with pd.ExcelWriter('verifications.xlsx', engine='openpyxl') as writer:
+            results_no_intervention.to_excel(writer, sheet_name='Control', index=True)
+            results_intervention.to_excel(writer, sheet_name='Intervention', index=True)
+    return None
+
+
+index = [
+    # core outcomes
+    "percentage_developed_hcc",
+    "percentage_developed_cirrhosis",
+    "mean_survival_time_after_hcc_dev",
+    "all_rewards",
+      "all_utilities",
+
+    # raw rewards
+    "reward_mazaldi",
+    "reward_false_positive_hcc",
+    "reward_early_stage_hcc",
+    "reward_intermediate_stage_hcc",
+    "reward_late_stage_hcc",
+    "reward_all_hcc",
+     'reward_early_treated',
+    'reward_early_untreated',
+    'reward_mid_treated',
+    'reward_mid_untreated',
+    'reward_late_treated',
+    'reward_late_untreated',
+
+    # discounted rewards
+    "discounted_reward_mazaldi",
+    "discounted_reward_false_positive_hcc",
+    "discounted_reward_early_stage_hcc",
+    "discounted_reward_intermediate_stage_hcc",
+    "discounted_reward_late_stage_hcc",
+    "discounted_reward_all_hcc",
+    'discounted_reward_early_treated',
+    'discounted_reward_early_untreated',
+    'discounted_reward_mid_treated',
+    'discounted_reward_mid_untreated',
+    'discounted_reward_late_treated',
+    'discounted_reward_late_untreated',
+
+    # utilities
+    "utility_mazaldi",
+    "utility_false_positive_hcc",
+    "utility_early_stage_hcc",
+    "utility_intermediate_stage_hcc",
+    "utility_late_stage_hcc",
+    "utility_all_hcc",
+    'utility_early_treated',
+    'utility_early_untreated',
+    'utility_mid_treated',
+    'utility_mid_untreated',
+    'utility_late_treated',
+    'utility_late_untreated',
+
+    # discounted utilities
+    "discounted_utility_mazaldi",
+    "discounted_utility_false_positive_hcc",
+    "discounted_utility_early_stage_hcc",
+    "discounted_utility_intermediate_stage_hcc",
+    "discounted_utility_late_stage_hcc",
+    "discounted_utility_all_hcc",
+      'discounted_utility_early_treated',
+    'discounted_utility_early_untreated',
+    'discounted_utility_mid_treated',
+    'discounted_utility_mid_untreated',
+    'discounted_utility_late_treated',
+    'discounted_utility_late_untreated',
+
+    "average_age_develop_mazaldi",
+    "average_age_develop_false_positive_hcc",
+    "average_age_develop_early_stage_hcc",
+    "average_age_develop_intermediate_stage_hcc",
+    "average_age_develop_late_stage_hcc",
+    "average_age_develop_all_hcc",
+    "average_age_develop_early_treated",
+    "average_age_develop_early_untreated",
+    "average_age_develop_mid_treated",
+    "average_age_develop_mid_untreated",
+    "average_age_develop_late_treated",
+    "average_age_develop_late_untreated",
+
+    "average_age_death_mazaldi",
+    "average_age_death_false_positive_hcc",
+    "average_age_death_early_stage_hcc",
+    "average_age_death_intermediate_stage_hcc",
+    "average_age_death_late_stage_hcc",
+    "average_age_death_all_hcc",
+    "average_age_death_early_treated",
+    "average_age_death_early_untreated",
+    "average_age_death_mid_treated",
+    "average_age_death_mid_untreated",
+    "average_age_death_late_treated",
+    "average_age_death_late_untreated",
+]
+
+
+def main():
+    num_runs = 1
+    columns = [f'Run {i+1}' for i in range(num_runs)] 
+
+    sheets = pd.read_excel(file, sheet_name=None)
+
+    s, discountMatrix,rewardVector, utilityVector = completeRunAge(sheets, intervention=False)
+    s1 = pd.DataFrame(s)
+    s1.to_csv('statesControl.csv')
+
+    results_no_intervention = statesPostProcessing(s, discountMatrix,rewardVector, utilityVector, columns, index)
+
+    s, discountMatrix,rewardVector, utilityVector = completeRunAge(sheets, intervention=True)
+    s1 = pd.DataFrame(s)
+    s1.to_csv('statesIntervention.csv')
+
+    results_intervention = statesPostProcessing(s,discountMatrix,rewardVector, utilityVector, columns, index)
+
+    ICER = (results_intervention.loc['all_rewards'][0] -results_no_intervention.loc['all_rewards'][0])/(results_intervention.loc['all_utilities'][0] -results_no_intervention.loc['all_utilities'][0])
+    print(ICER)
+    results_no_intervention = pd.concat((results_no_intervention, results_intervention), axis = 1)
+    results_no_intervention.columns = ["Control","Intervention"]
+    results_no_intervention["ICER"] = ICER
+
+    df = results_no_intervention
+    num_cols = df.select_dtypes(include=[np.number]).columns
+    formatters = {col: fmt for col in num_cols}
+    print(df.to_string(formatters=formatters, index=True))
+    print(results_no_intervention)
+
+
+    writeout(results_no_intervention, results_no_intervention)
+
+    return None
+
+if __name__ == '__main__':
+    main()
