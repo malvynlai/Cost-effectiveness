@@ -2,12 +2,7 @@ import numpy as np
 import pandas as pd
 from numba import njit, prange
 from datetime import datetime
-
-import numpy as np
-from numba import njit, prange
 from numba.typed import List as NumbaList
-
-
 from scipy import stats
 import compressedInputsRead as readInputs
 import MCMC_improved_cleanv3_ver as MC
@@ -29,11 +24,6 @@ pd.set_option('display.max_colwidth', None)
 
 
 
-import numpy as np
-
-import numpy as np
-from numba import njit, prange
-from numba.typed import List as NumbaList
 
 def average_age_death_after_state_numba(target_states_nb, ages, states):
     total = 0.0
@@ -56,7 +46,6 @@ def to_numba_list(py_list):
         nb.append(np.int32(x))
     return nb
 
-import numpy as np
 
 def first_hit_mask(M, targets):
     """
